@@ -206,6 +206,12 @@ python webui.py
 
 ---
 
+## Donate
+
+**TRON (TRC20):** `TSQt2sV6NypuXFK3mqtPCgzHeoXug6pQp4`
+
+---
+
 ## License
 
 MIT — free to use, modify, and distribute.
