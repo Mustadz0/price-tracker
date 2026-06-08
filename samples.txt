@@ -1,0 +1,12 @@
+Sample product URLs for testing the price tracker.
+
+Add them:
+  python cli.py add "https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html"
+  python cli.py add "https://books.toscrape.com/catalogue/tipping-the-velvet_999/index.html"
+  python cli.py add "https://books.toscrape.com/catalogue/soumission_998/index.html"
+
+Check prices:
+  python cli.py check --all
+
+View dashboard:
+  python webui.py  ->  http://localhost:8040
