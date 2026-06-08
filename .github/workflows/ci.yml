@@ -9,4 +9,8 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements.txt
-      - run: python -c "import core.database; import core.scraper; print('Imports OK')"
+      - run: python -c "import core.database; import core.scraper; print('All imports OK')"
+      - run: python -c "
+result = core.scraper.scrape('https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html');
+assert result and result['price'] > 0;
+print(f'Scraper OK: ${result[\"price\"]} - {result[\"title\"][:40]}')"

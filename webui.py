@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
+import csv
+import io
 import json
 import os
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, Response
 import uvicorn
 
 from core.database import PriceDB
 from core.scraper import scrape
+from core.notifier import send_telegram
 
 app = FastAPI(title="Competitor Price Tracker")
 
@@ -19,17 +24,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Price Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f5f7fa;color:#1a1a2e;min-height:100vh}
   .header{background:#1a1a2e;color:#fff;padding:20px 0;box-shadow:0 2px 8px rgba(0,0,0,.15)}
   .header h1{font-size:1.6rem;margin-bottom:4px}
   .header p{font-size:.9rem;color:#a0aec0}
-  .container{max-width:1000px;margin:0 auto;padding:0 20px}
+  .container{max-width:1100px;margin:0 auto;padding:0 20px}
   .nav{background:#fff;border-bottom:1px solid #e2e8f0;padding:12px 0}
   .nav a{color:#4a5568;text-decoration:none;margin-right:20px;font-size:.9rem;font-weight:500}
-  .nav a:hover{color:#2b6cb0}
-  .nav a.active{color:#2b6cb0;border-bottom:2px solid #2b6cb0}
+  .nav a:hover,.nav a.active{color:#2b6cb0;border-bottom:2px solid #2b6cb0}
   .section{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:24px;margin:24px 0}
   .section h2{font-size:1.2rem;margin-bottom:16px;color:#2d3748}
   .form-row{display:flex;gap:12px;flex-wrap:wrap}
@@ -37,11 +42,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .form-row input[type=url]:focus{border-color:#4299e1}
   .btn{background:#4299e1;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:.95rem;cursor:pointer;font-weight:500;transition:background .2s}
   .btn:hover{background:#3182ce}
-  .btn-sm{font-size:.8rem;padding:4px 12px}
+  .btn-sm{font-size:.8rem;padding:6px 12px}
   .btn-danger{background:#e53e3e}
   .btn-danger:hover{background:#c53030}
-  .btn-outline{background:transparent;color:#4299e1;border:2px solid #4299e1}
-  .btn-outline:hover{background:#ebf8ff}
   table{width:100%;border-collapse:collapse;font-size:.9rem}
   th{text-align:left;padding:10px 8px;border-bottom:2px solid #e2e8f0;color:#718096;font-weight:600;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em}
   td{padding:10px 8px;border-bottom:1px solid #e2e8f0}
@@ -49,13 +52,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .price{font-weight:600;font-size:1.05rem}
   .up{color:#38a169}
   .down{color:#e53e3e}
-  .change{font-size:.8rem}
   .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600}
   .badge-up{background:#c6f6d5;color:#22543d}
   .badge-down{background:#fed7d7;color:#742a2a}
   .empty{text-align:center;padding:40px 20px;color:#a0aec0}
-  .empty p{font-size:1.1rem;margin-bottom:8px}
-  .empty .sub{font-size:.9rem}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-top:16px}
   .card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px;transition:box-shadow .2s}
   .card:hover{box-shadow:0 4px 12px rgba(0,0,0,.1)}
@@ -65,8 +65,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .card .meta{font-size:.75rem;color:#a0aec0;margin-top:8px}
   .flash{background:#c6f6d5;color:#22543d;padding:12px 16px;border-radius:6px;margin-bottom:16px;font-size:.9rem;display:none}
   .flash.error{background:#fed7d7;color:#742a2a}
-  .loading{text-align:center;padding:12px;color:#718096}
   .inline-flex{display:inline-flex;gap:6px;align-items:center}
+  .chart-box{background:#fff;border-radius:8px;padding:16px;margin-top:12px;border:1px solid #e2e8f0}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
   @media(max-width:600px){.form-row input[type=url]{min-width:100%}.btn{width:100%}}
 </style>
 </head>
@@ -83,6 +84,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="container">
     <a href="/" class="active">Dashboard</a>
     <a href="/alerts">Alerts</a>
+    <span style="float:right;font-size:.8rem;color:#718096">
+      <a href="/export/csv" style="color:#718096;text-decoration:none">Export CSV</a>
+    </span>
   </div>
 </div>
 
@@ -98,14 +102,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <div class="section">
+    <div class="toolbar">
+      <button class="btn btn-sm" onclick="checkAll()">[CHECK ALL]</button>
+    </div>
     <h2>Tracked Products</h2>
     <div id="productGrid" class="grid">
       {{PRODUCTS}}
     </div>
   </div>
+
+  <div id="chartSection" class="section" style="display:none">
+    <h2>Price History</h2>
+    <div class="chart-box">
+      <canvas id="priceChart"></canvas>
+    </div>
+  </div>
 </div>
 
 <script>
+let priceChart = null;
+
 document.getElementById('addForm')?.addEventListener('submit', async function(e){
   e.preventDefault();
   const url = this.querySelector('[name=url]').value;
@@ -145,6 +161,58 @@ async function checkPrice(id) {
   } finally {
     if(btn) { btn.disabled = false; btn.textContent = '[SYNC]'; }
   }
+}
+
+async function checkAll() {
+  const btns = document.querySelectorAll('.check-btn');
+  btns.forEach(b => { b.disabled = true; b.textContent = '...'; });
+  showFlash('Checking all prices...');
+  try {
+    const r = await fetch('/check-all');
+    const data = await r.json();
+    showFlash('Checked '+data.checked+' products');
+    location.reload();
+  } catch(e) {
+    showFlash('Check all failed', true);
+  } finally {
+    btns.forEach(b => { b.disabled = false; b.textContent = '[SYNC]'; });
+  }
+}
+
+async function showHistory(id) {
+  const r = await fetch('/history/'+id);
+  const data = await r.json();
+  if(!data.length) { showFlash('No history for this product', true); return; }
+  const section = document.getElementById('chartSection');
+  section.style.display = 'block';
+  const labels = data.map(d => d.checked_at.slice(5,16)).reverse();
+  const prices = data.map(d => d.price).reverse();
+  if(priceChart) priceChart.destroy();
+  const ctx = document.getElementById('priceChart').getContext('2d');
+  priceChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Price ($)',
+        data: prices,
+        borderColor: '#4299e1',
+        backgroundColor: 'rgba(66,153,225,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: false, ticks: { callback: v => '$'+v.toFixed(2) } },
+        x: { ticks: { maxTicksLimit: 10 } }
+      }
+    }
+  });
 }
 
 async function deleteProduct(id) {
@@ -193,8 +261,6 @@ ALERTS_TEMPLATE = r"""<!DOCTYPE html>
   .badge-up{background:#c6f6d5;color:#22543d}
   .badge-down{background:#fed7d7;color:#742a2a}
   .empty{text-align:center;padding:40px;color:#a0aec0}
-  .back{display:inline-block;margin-bottom:16px;color:#4299e1;text-decoration:none;font-size:.9rem}
-  .back:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -210,39 +276,43 @@ ALERTS_TEMPLATE = r"""<!DOCTYPE html>
 </html>"""
 
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
+def _make_cards():
     db = PriceDB()
     products = db.get_products()
-    cards = ""
     if not products:
-        cards = '<div class="empty"><p>No products tracked yet</p><p class="sub">Add a product URL above to start monitoring prices</p></div>'
-    else:
-        for p in products:
-            latest = db.get_latest_price(p["id"])
-            prev = db.get_previous_price(p["id"])
-            change_str = ""
-            change_class = ""
-            if latest and prev and prev != 0:
-                pct = ((latest - prev) / prev) * 100
-                change_str = f"{pct:+.1f}%"
-                change_class = "up" if pct > 0 else "down"
-            price_str = f"${latest:.2f}" if latest else "?"
-            cards += f"""<div class="card">
-              <h3><a href="{p['url']}" target="_blank" style="color:#2d3748;text-decoration:none">{p['name'][:80]}</a></h3>
-              <div class="price-row">
-                <span class="price">{price_str}</span>
-                <span class="change {change_class}">{change_str}</span>
-              </div>
-              <div class="meta">
-                <span class="inline-flex">
-                  <button class="btn btn-sm check-btn" data-id="{p['id']}" onclick="checkPrice({p['id']})">[SYNC]</button>
-                  <button class="btn btn-sm btn-danger" onclick="deleteProduct({p['id']})">[X]</button>
-                </span>
-                <span style="float:right">ID #{p['id']}</span>
-              </div>
-            </div>"""
-    html = HTML_TEMPLATE.replace("{{PRODUCTS}}", cards)
+        return '<div class="empty"><p>No products tracked yet</p><p class="sub">Add a product URL above to start monitoring prices</p></div>'
+    cards = ""
+    for p in products:
+        latest = db.get_latest_price(p["id"])
+        prev = db.get_previous_price(p["id"])
+        change_str = ""
+        change_class = ""
+        if latest and prev and prev != 0:
+            pct = ((latest - prev) / prev) * 100
+            change_str = f"{pct:+.1f}%"
+            change_class = "up" if pct > 0 else "down"
+        price_str = f"${latest:.2f}" if latest else "?"
+        cards += f"""<div class="card">
+          <h3><a href="{p['url']}" target="_blank" style="color:#2d3748;text-decoration:none">{p['name'][:80]}</a></h3>
+          <div class="price-row">
+            <span class="price">{price_str}</span>
+            <span class="{change_class}">{change_str}</span>
+          </div>
+          <div class="meta">
+            <span class="inline-flex">
+              <button class="btn btn-sm check-btn" data-id="{p['id']}" onclick="checkPrice({p['id']})">[SYNC]</button>
+              <button class="btn btn-sm" onclick="showHistory({p['id']})">[CHART]</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteProduct({p['id']})">[X]</button>
+            </span>
+            <span style="float:right">ID #{p['id']}</span>
+          </div>
+        </div>"""
+    return cards
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    html = HTML_TEMPLATE.replace("{{PRODUCTS}}", _make_cards())
     return HTMLResponse(content=html)
 
 
@@ -297,7 +367,64 @@ def check_price(pid: int):
         change = ((result["price"] - old_price) / old_price) * 100
         msg = f"Price changed: ${old_price:.2f} -> ${result['price']:.2f} ({change:+.1f}%)"
         db.record_alert(pid, old_price, result["price"], change, msg)
+        send_telegram(f"[PRICE] {p['name'][:60]}\n{msg}")
     return {"ok": True, "price": result["price"], "title": result["title"][:80]}
+
+
+@app.get("/check-all")
+def check_all():
+    db = PriceDB()
+    products = db.get_products()
+    count = 0
+    for p in products:
+        result = scrape(p["url"])
+        if not result:
+            continue
+        old_price = db.get_latest_price(p["id"])
+        db.save_price(p["id"], result["price"])
+        if old_price and old_price != result["price"]:
+            change = ((result["price"] - old_price) / old_price) * 100
+            msg = f"Price changed: ${old_price:.2f} -> ${result['price']:.2f} ({change:+.1f}%)"
+            db.record_alert(p["id"], old_price, result["price"], change, msg)
+            send_telegram(f"[PRICE] {p['name'][:60]}\n{msg}")
+        count += 1
+    return {"ok": True, "checked": count}
+
+
+@app.get("/history/{pid}")
+def price_history(pid: int):
+    db = PriceDB()
+    history = db.get_price_history(pid)
+    return [
+        {"checked_at": h["checked_at"], "price": h["price"]}
+        for h in history
+    ]
+
+
+@app.get("/export/csv")
+def export_csv():
+    db = PriceDB()
+    products = db.get_products()
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["ID", "Product", "URL", "Latest Price", "Previous Price", "Change %", "Last Checked"])
+    for p in products:
+        latest = db.get_latest_price(p["id"])
+        prev = db.get_previous_price(p["id"])
+        change = ""
+        if latest and prev and prev != 0:
+            change = f"{((latest - prev) / prev) * 100:+.1f}%"
+        history = db.get_price_history(p["id"], limit=1)
+        last_checked = history[0]["checked_at"] if history else ""
+        w.writerow([p["id"], p["name"], p["url"],
+                     f"${latest:.2f}" if latest else "",
+                     f"${prev:.2f}" if prev else "",
+                     change, last_checked])
+    return Response(
+        content="\ufeff" + out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=price_tracker_export.csv"},
+    )
 
 
 @app.post("/delete/{pid}")
@@ -305,6 +432,33 @@ def delete_product(pid: int):
     db = PriceDB()
     db.delete_product(pid)
     return {"ok": True}
+
+
+def _auto_check_loop():
+    while True:
+        try:
+            db = PriceDB()
+            products = db.get_products()
+            for p in products:
+                result = scrape(p["url"])
+                if not result:
+                    continue
+                old_price = db.get_latest_price(p["id"])
+                db.save_price(p["id"], result["price"])
+                if old_price and old_price != result["price"]:
+                    change = ((result["price"] - old_price) / old_price) * 100
+                    msg = f"Price changed: ${old_price:.2f} -> ${result['price']:.2f} ({change:+.1f}%)"
+                    db.record_alert(p["id"], old_price, result["price"], change, msg)
+                    send_telegram(f"[PRICE] {p['name'][:60]}\n{msg}")
+        except Exception:
+            pass
+        time.sleep(3600)
+
+
+@app.on_event("startup")
+def start_scheduler():
+    t = threading.Thread(target=_auto_check_loop, daemon=True)
+    t.start()
 
 
 def main():
