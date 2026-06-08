@@ -7,9 +7,10 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 import uvicorn
 
 from core.database import PriceDB
@@ -18,7 +19,91 @@ from core.notifier import send_telegram
 
 app = FastAPI(title="Competitor Price Tracker")
 
-HTML_TEMPLATE = r"""<!DOCTYPE html>
+
+def _get_user(request: Request) -> Optional[dict]:
+    token = request.cookies.get("session")
+    if not token:
+        return None
+    db = PriceDB()
+    user = db.get_user_by_token(token)
+    if user:
+        return {"id": user["id"], "email": user["email"], "name": user["name"]}
+    return None
+
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Price Tracker — Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f5f7fa;color:#1a1a2e;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);padding:40px;width:100%;max-width:400px;margin:20px}
+.card h1{font-size:1.5rem;margin-bottom:4px}
+.card .sub{color:#718096;font-size:.9rem;margin-bottom:24px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:.85rem;color:#4a5568;margin-bottom:4px;font-weight:500}
+.form-group input{width:100%;padding:10px 14px;border:2px solid #e2e8f0;border-radius:6px;font-size:.95rem;outline:none;transition:border-color .2s}
+.form-group input:focus{border-color:#4299e1}
+.btn{width:100%;background:#4299e1;color:#fff;border:none;padding:12px;border-radius:6px;font-size:1rem;cursor:pointer;font-weight:500;transition:background .2s}
+.btn:hover{background:#3182ce}
+.error{background:#fed7d7;color:#742a2a;padding:10px;border-radius:6px;font-size:.85rem;margin-bottom:16px;display:none}
+.switch{text-align:center;margin-top:16px;font-size:.9rem;color:#718096}
+.switch a{color:#4299e1;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>[PRICE] Price Tracker</h1>
+  <p class="sub" id="formTitle">Sign in to your account</p>
+  <div class="error" id="errorMsg"></div>
+  <form id="authForm">
+    <input type="hidden" name="mode" id="mode" value="login">
+    <div class="form-group">
+      <label>Email</label>
+      <input type="email" name="email" required>
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" name="password" required>
+    </div>
+    <button type="submit" class="btn" id="submitBtn">Sign In</button>
+  </form>
+  <div class="switch">
+    <span id="switchText">Don't have an account?</span>
+    <a href="#" id="switchLink" onclick="toggleMode();return false">Register</a>
+  </div>
+</div>
+<script>
+let isLogin = true;
+function toggleMode() {
+  isLogin = !isLogin;
+  document.getElementById('mode').value = isLogin ? 'login' : 'register';
+  document.getElementById('formTitle').textContent = isLogin ? 'Sign in to your account' : 'Create a new account';
+  document.getElementById('submitBtn').textContent = isLogin ? 'Sign In' : 'Register';
+  document.getElementById('switchText').textContent = isLogin ? "Don't have an account?" : 'Already have an account?';
+  document.getElementById('switchLink').textContent = isLogin ? 'Register' : 'Sign In';
+}
+document.getElementById('authForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const fd = new FormData(this);
+  const r = await fetch('/auth', {method:'POST', body: new URLSearchParams(fd), redirect:'follow'});
+  if (r.redirected) {
+    window.location.href = '/';
+  } else {
+    const data = await r.json();
+    const err = document.getElementById('errorMsg');
+    err.textContent = data.error || 'Failed';
+    err.style.display = 'block';
+  }
+});
+</script>
+</body>
+</html>"""
+
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -28,13 +113,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f5f7fa;color:#1a1a2e;min-height:100vh}
-  .header{background:#1a1a2e;color:#fff;padding:20px 0;box-shadow:0 2px 8px rgba(0,0,0,.15)}
-  .header h1{font-size:1.6rem;margin-bottom:4px}
+  .header{background:#1a1a2e;color:#fff;padding:20px 0}
+  .header .container{max-width:1100px;margin:0 auto;padding:0 20px;display:flex;justify-content:space-between;align-items:center}
+  .header h1{font-size:1.6rem}
   .header p{font-size:.9rem;color:#a0aec0}
+  .user-info{font-size:.85rem;color:#a0aec0}
+  .user-info a{color:#4299e1;text-decoration:none;margin-left:12px}
   .container{max-width:1100px;margin:0 auto;padding:0 20px}
   .nav{background:#fff;border-bottom:1px solid #e2e8f0;padding:12px 0}
-  .nav a{color:#4a5568;text-decoration:none;margin-right:20px;font-size:.9rem;font-weight:500}
+  .nav .container{display:flex;gap:20px;align-items:center}
+  .nav a{color:#4a5568;text-decoration:none;font-size:.9rem;font-weight:500}
   .nav a:hover,.nav a.active{color:#2b6cb0;border-bottom:2px solid #2b6cb0}
+  .nav .right{margin-left:auto;font-size:.8rem}
   .section{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:24px;margin:24px 0}
   .section h2{font-size:1.2rem;margin-bottom:16px;color:#2d3748}
   .form-row{display:flex;gap:12px;flex-wrap:wrap}
@@ -75,8 +165,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="header">
   <div class="container">
-    <h1>[PRICE] Competitor Price Tracker</h1>
-    <p>Monitor competitor prices and get alerted on changes</p>
+    <div>
+      <h1>[PRICE] Price Tracker</h1>
+      <p>Monitor competitor prices and get alerted on changes</p>
+    </div>
+    <div class="user-info">
+      {{USER_EMAIL}}
+      <a href="/logout">Logout</a>
+    </div>
   </div>
 </div>
 
@@ -84,9 +180,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="container">
     <a href="/" class="active">Dashboard</a>
     <a href="/alerts">Alerts</a>
-    <span style="float:right;font-size:.8rem;color:#718096">
-      <a href="/export/csv" style="color:#718096;text-decoration:none">Export CSV</a>
-    </span>
+    <span class="right"><a href="/export/csv" style="color:#718096;text-decoration:none">Export CSV</a></span>
   </div>
 </div>
 
@@ -95,7 +189,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <div class="section">
     <h2>Add Product</h2>
-    <form id="addForm" class="form-row" action="/add" method="POST">
+    <form id="addForm" class="form-row">
       <input type="url" name="url" placeholder="https://example.com/product" required>
       <button type="submit" class="btn">Track Price</button>
     </form>
@@ -232,7 +326,7 @@ function showFlash(msg, error) {
 </body>
 </html>"""
 
-ALERTS_TEMPLATE = r"""<!DOCTYPE html>
+ALERTS_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -241,14 +335,14 @@ ALERTS_TEMPLATE = r"""<!DOCTYPE html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f5f7fa;color:#1a1a2e}
-  .header{background:#1a1a2e;color:#fff;padding:20px 0;box-shadow:0 2px 8px rgba(0,0,0,.15)}
-  .header h1{font-size:1.6rem;margin-bottom:4px}
-  .header p{font-size:.9rem;color:#a0aec0}
+  .header{background:#1a1a2e;color:#fff;padding:20px 0}
+  .header .container{max-width:1000px;margin:0 auto;padding:0 20px;display:flex;justify-content:space-between;align-items:center}
+  .header h1{font-size:1.6rem}
   .container{max-width:1000px;margin:0 auto;padding:0 20px}
   .nav{background:#fff;border-bottom:1px solid #e2e8f0;padding:12px 0}
-  .nav a{color:#4a5568;text-decoration:none;margin-right:20px;font-size:.9rem;font-weight:500}
-  .nav a:hover{color:#2b6cb0}
-  .nav a.active{color:#2b6cb0;border-bottom:2px solid #2b6cb0}
+  .nav .container{display:flex;gap:20px}
+  .nav a{color:#4a5568;text-decoration:none;font-size:.9rem;font-weight:500}
+  .nav a:hover,.nav a.active{color:#2b6cb0;border-bottom:2px solid #2b6cb0}
   .section{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:24px;margin:24px 0}
   .section h2{font-size:1.2rem;margin-bottom:16px;color:#2d3748}
   table{width:100%;border-collapse:collapse;font-size:.9rem}
@@ -261,10 +355,17 @@ ALERTS_TEMPLATE = r"""<!DOCTYPE html>
   .badge-up{background:#c6f6d5;color:#22543d}
   .badge-down{background:#fed7d7;color:#742a2a}
   .empty{text-align:center;padding:40px;color:#a0aec0}
+  .user-info{font-size:.85rem;color:#a0aec0}
+  .user-info a{color:#4299e1;text-decoration:none;margin-left:12px}
 </style>
 </head>
 <body>
-<div class="header"><div class="container"><h1>[ALERT] Price Alerts</h1></div></div>
+<div class="header">
+  <div class="container">
+    <h1>[ALERT] Price Alerts</h1>
+    <div class="user-info">{{USER_EMAIL}} <a href="/logout">Logout</a></div>
+  </div>
+</div>
 <div class="nav"><div class="container"><a href="/">Dashboard</a><a href="/alerts" class="active">Alerts</a></div></div>
 <div class="container">
   <div class="section">
@@ -276,50 +377,66 @@ ALERTS_TEMPLATE = r"""<!DOCTYPE html>
 </html>"""
 
 
-def _make_cards():
-    db = PriceDB()
-    products = db.get_products()
-    if not products:
-        return '<div class="empty"><p>No products tracked yet</p><p class="sub">Add a product URL above to start monitoring prices</p></div>'
-    cards = ""
-    for p in products:
-        latest = db.get_latest_price(p["id"])
-        prev = db.get_previous_price(p["id"])
-        change_str = ""
-        change_class = ""
-        if latest and prev and prev != 0:
-            pct = ((latest - prev) / prev) * 100
-            change_str = f"{pct:+.1f}%"
-            change_class = "up" if pct > 0 else "down"
-        price_str = f"${latest:.2f}" if latest else "?"
-        cards += f"""<div class="card">
-          <h3><a href="{p['url']}" target="_blank" style="color:#2d3748;text-decoration:none">{p['name'][:80]}</a></h3>
-          <div class="price-row">
-            <span class="price">{price_str}</span>
-            <span class="{change_class}">{change_str}</span>
-          </div>
-          <div class="meta">
-            <span class="inline-flex">
-              <button class="btn btn-sm check-btn" data-id="{p['id']}" onclick="checkPrice({p['id']})">[SYNC]</button>
-              <button class="btn btn-sm" onclick="showHistory({p['id']})">[CHART]</button>
-              <button class="btn btn-sm btn-danger" onclick="deleteProduct({p['id']})">[X]</button>
-            </span>
-            <span style="float:right">ID #{p['id']}</span>
-          </div>
-        </div>"""
-    return cards
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return LOGIN_HTML
+
+
+@app.get("/logout")
+def logout():
+    resp = RedirectResponse(url="/login")
+    resp.delete_cookie("session")
+    return resp
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
-    html = HTML_TEMPLATE.replace("{{PRODUCTS}}", _make_cards())
-    return HTMLResponse(content=html)
+def dashboard(request: Request):
+    user = _get_user(request)
+    if not user:
+        return RedirectResponse(url="/login")
+    db = PriceDB()
+    products = db.get_products(user["id"])
+    cards = ""
+    if not products:
+        cards = '<div class="empty"><p>No products tracked yet</p><p class="sub">Add a product URL above to start monitoring prices</p></div>'
+    else:
+        for p in products:
+            latest = db.get_latest_price(p["id"])
+            prev = db.get_previous_price(p["id"])
+            change_str = ""
+            change_class = ""
+            if latest and prev and prev != 0:
+                pct = ((latest - prev) / prev) * 100
+                change_str = f"{pct:+.1f}%"
+                change_class = "up" if pct > 0 else "down"
+            price_str = f"${latest:.2f}" if latest else "?"
+            cards += f"""<div class="card">
+              <h3><a href="{p['url']}" target="_blank" style="color:#2d3748;text-decoration:none">{p['name'][:80]}</a></h3>
+              <div class="price-row">
+                <span class="price">{price_str}</span>
+                <span class="{change_class}">{change_str}</span>
+              </div>
+              <div class="meta">
+                <span class="inline-flex">
+                  <button class="btn btn-sm check-btn" data-id="{p['id']}" onclick="checkPrice({p['id']})">[SYNC]</button>
+                  <button class="btn btn-sm" onclick="showHistory({p['id']})">[CHART]</button>
+                  <button class="btn btn-sm btn-danger" onclick="deleteProduct({p['id']})">[X]</button>
+                </span>
+                <span style="float:right">ID #{p['id']}</span>
+              </div>
+            </div>"""
+    return HTMLResponse(
+        DASHBOARD_HTML.replace("{{PRODUCTS}}", cards).replace("{{USER_EMAIL}}", user["email"])
+    )
 
 
 @app.get("/alerts", response_class=HTMLResponse)
-def alerts_page():
+def alerts_page(request: Request):
+    user = _get_user(request)
+    if not user:
+        return RedirectResponse(url="/login")
     db = PriceDB()
-    alerts = db.get_alerts()
+    alerts = db.get_alerts(user["id"])
     rows = ""
     if not alerts:
         rows = '<div class="empty"><p>No price alerts yet</p></div>'
@@ -336,24 +453,48 @@ def alerts_page():
               <td><span class="{cls}">{arrow} {a['change_pct']:+.1f}%</span></td>
             </tr>"""
         rows += "</table>"
-    html = ALERTS_TEMPLATE.replace("{{ALERTS}}", rows)
-    return HTMLResponse(content=html)
+    return HTMLResponse(
+        ALERTS_HTML.replace("{{ALERTS}}", rows).replace("{{USER_EMAIL}}", user["email"])
+    )
+
+
+@app.post("/auth")
+def auth(email: str = Form(...), password: str = Form(...), mode: str = Form("login")):
+    db = PriceDB()
+    if mode == "register":
+        uid = db.register_user(email, password)
+        if uid == -1:
+            return {"ok": False, "error": "Email already registered"}
+        token = db.login_user(email, password)
+    else:
+        token = db.login_user(email, password)
+        if not token:
+            return {"ok": False, "error": "Invalid email or password"}
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.set_cookie(key="session", value=token, max_age=86400 * 30, httponly=True)
+    return resp
 
 
 @app.post("/add")
-def add_product(url: str = Form(...)):
+def add_product(request: Request, url: str = Form(...)):
+    user = _get_user(request)
+    if not user:
+        return {"ok": False, "error": "Not logged in"}
     db = PriceDB()
     result = scrape(url)
     if result:
-        pid = db.add_product(url, result["title"])
+        pid = db.add_product(url, result["title"], user["id"])
         db.save_price(pid, result["price"])
         return {"ok": True, "id": pid, "name": result["title"][:80], "price": result["price"]}
-    pid = db.add_product(url, url)
+    pid = db.add_product(url, url, user["id"])
     return {"ok": False, "error": "Could not scrape price, added URL only", "id": pid}
 
 
 @app.get("/check/{pid}")
-def check_price(pid: int):
+def check_price(request: Request, pid: int):
+    user = _get_user(request)
+    if not user:
+        return {"ok": False, "error": "Not logged in"}
     db = PriceDB()
     p = db.get_product(pid)
     if not p:
@@ -372,9 +513,12 @@ def check_price(pid: int):
 
 
 @app.get("/check-all")
-def check_all():
+def check_all(request: Request):
+    user = _get_user(request)
+    if not user:
+        return {"ok": False, "error": "Not logged in"}
     db = PriceDB()
-    products = db.get_products()
+    products = db.get_products(user["id"])
     count = 0
     for p in products:
         result = scrape(p["url"])
@@ -392,19 +536,22 @@ def check_all():
 
 
 @app.get("/history/{pid}")
-def price_history(pid: int):
+def price_history(request: Request, pid: int):
+    user = _get_user(request)
+    if not user:
+        return []
     db = PriceDB()
     history = db.get_price_history(pid)
-    return [
-        {"checked_at": h["checked_at"], "price": h["price"]}
-        for h in history
-    ]
+    return [{"checked_at": h["checked_at"], "price": h["price"]} for h in history]
 
 
 @app.get("/export/csv")
-def export_csv():
+def export_csv(request: Request):
+    user = _get_user(request)
+    if not user:
+        return RedirectResponse(url="/login")
     db = PriceDB()
-    products = db.get_products()
+    products = db.get_products(user["id"])
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["ID", "Product", "URL", "Latest Price", "Previous Price", "Change %", "Last Checked"])
@@ -428,7 +575,10 @@ def export_csv():
 
 
 @app.post("/delete/{pid}")
-def delete_product(pid: int):
+def delete_product(request: Request, pid: int):
+    user = _get_user(request)
+    if not user:
+        return {"ok": False}
     db = PriceDB()
     db.delete_product(pid)
     return {"ok": True}
@@ -438,7 +588,9 @@ def _auto_check_loop():
     while True:
         try:
             db = PriceDB()
-            products = db.get_products()
+            products = db.conn.execute(
+                "SELECT * FROM products WHERE is_active = 1 ORDER BY created_at DESC"
+            ).fetchall()
             for p in products:
                 result = scrape(p["url"])
                 if not result:

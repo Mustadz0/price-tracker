@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: price-tracker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python webui.py
+    envVars:
+      - key: PORT
+        value: 8040

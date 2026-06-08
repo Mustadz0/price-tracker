@@ -1,3 +1,6 @@
+import hashlib
+import os
+import secrets
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -18,14 +21,30 @@ def get_db() -> sqlite3.Connection:
 
 def _init(conn: sqlite3.Connection):
     conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            name TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            url TEXT NOT NULL,
             name TEXT,
             currency TEXT DEFAULT 'USD',
             alert_threshold REAL DEFAULT -5.0,
             is_active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
         CREATE TABLE IF NOT EXISTS price_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,27 +67,81 @@ def _init(conn: sqlite3.Connection):
     """)
 
 
+def _hash_password(password: str, salt: Optional[str] = None) -> tuple:
+    if salt is None:
+        salt = secrets.token_hex(8)
+    h = hashlib.sha256((salt + password).encode()).hexdigest()
+    return f"{salt}:{h}"
+
+
+def _check_password(password: str, stored: str) -> bool:
+    try:
+        salt, h = stored.split(":", 1)
+        return _hash_password(password, salt)[0] == stored
+    except ValueError:
+        return False
+
+
 class PriceDB:
     def __init__(self):
         self.conn = get_db()
 
-    def add_product(self, url: str, name: str = "") -> int:
+    def register_user(self, email: str, password: str, name: str = "") -> int:
+        pw_hash = _hash_password(password)[0]
         try:
             cur = self.conn.execute(
-                "INSERT INTO products (url, name) VALUES (?, ?)",
-                (url, name or url),
+                "INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)",
+                (email, pw_hash, name or email.split("@")[0]),
             )
             self.conn.commit()
             return cur.lastrowid
         except sqlite3.IntegrityError:
-            row = self.conn.execute(
-                "SELECT id FROM products WHERE url = ?", (url,)
-            ).fetchone()
-            return row["id"] if row else 0
+            return -1
 
-    def get_products(self) -> List[sqlite3.Row]:
+    def login_user(self, email: str, password: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT id, password_hash FROM users WHERE email = ?", (email,)
+        ).fetchone()
+        if row and _check_password(password, row["password_hash"]):
+            token = secrets.token_hex(32)
+            self.conn.execute(
+                "INSERT INTO sessions (user_id, token) VALUES (?, ?)",
+                (row["id"], token),
+            )
+            self.conn.commit()
+            return token
+        return None
+
+    def get_user_by_token(self, token: str) -> Optional[sqlite3.Row]:
+        row = self.conn.execute(
+            """SELECT u.id, u.email, u.name FROM sessions s
+               JOIN users u ON s.user_id = u.id
+               WHERE s.token = ?""",
+            (token,),
+        ).fetchone()
+        return row
+
+    def logout(self, token: str):
+        self.conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        self.conn.commit()
+
+    def add_product(self, url: str, name: str = "", user_id: int = 0) -> int:
+        existing = self.conn.execute(
+            "SELECT id FROM products WHERE url = ? AND user_id = ?", (url, user_id)
+        ).fetchone()
+        if existing:
+            return existing["id"]
+        cur = self.conn.execute(
+            "INSERT INTO products (url, name, user_id) VALUES (?, ?, ?)",
+            (url, name or url, user_id),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_products(self, user_id: int = 0) -> List[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM products WHERE is_active = 1 ORDER BY created_at DESC"
+            "SELECT * FROM products WHERE is_active = 1 AND user_id = ? ORDER BY created_at DESC",
+            (user_id,),
         ).fetchall()
 
     def get_product(self, pid: int) -> Optional[sqlite3.Row]:
@@ -110,12 +183,14 @@ class PriceDB:
         )
         self.conn.commit()
 
-    def get_alerts(self, limit: int = 20) -> List[sqlite3.Row]:
+    def get_alerts(self, user_id: int = 0, limit: int = 20) -> List[sqlite3.Row]:
         return self.conn.execute(
-            """SELECT a.*, p.name as product_name, p.url 
-               FROM price_alerts a JOIN products p ON a.product_id = p.id 
+            """SELECT a.*, p.name as product_name, p.url
+               FROM price_alerts a
+               JOIN products p ON a.product_id = p.id
+               WHERE p.user_id = ?
                ORDER BY a.created_at DESC LIMIT ?""",
-            (limit,),
+            (user_id, limit),
         ).fetchall()
 
     def delete_product(self, pid: int):

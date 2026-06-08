@@ -9,6 +9,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mustadz0/price-tracker/pulls)
 [![CI](https://github.com/Mustadz0/price-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Mustadz0/price-tracker/actions)
+[![Deploy to Render](https://img.shields.io/badge/Deploy%20to%20Render-46E3B7?logo=render&logoColor=white)](https://render.com/deploy?repo=https://github.com/Mustadz0/price-tracker)
 
 ---
 
