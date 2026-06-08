@@ -2,12 +2,19 @@
 
 # Price Tracker
 
-**Monitor competitor prices, get alerts on changes. Free & open-source.**
+### Monitor competitor prices, get alerts on changes. Free & open-source.
 
-[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mustadz0/price-tracker/pulls)
+[![CI](https://github.com/Mustadz0/price-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/Mustadz0/price-tracker/actions)
 
-[English](#english) • [العربية](#arabic) • [Français](#français) • [Español](#español) • [Deutsch](#deutsch) • [Türkçe](#türkçe)
+---
+
+[🇬🇧 English](#english) &nbsp;•&nbsp; [🇸🇦 العربية](#arabic) &nbsp;•&nbsp; [🇫🇷 Français](#francais) &nbsp;•&nbsp; [🇪🇸 Español](#espanol) &nbsp;•&nbsp; [🇩🇪 Deutsch](#deutsch) &nbsp;•&nbsp; [🇹🇷 Türkçe](#turkce)
+
+---
 
 ---
 
